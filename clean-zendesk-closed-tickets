@@ -1,0 +1,110 @@
+#! /bin/bash
+
+# Delete tickets from given group with status "Closed"
+
+usage="Script to delete tickets from specific ZenDesk group (max 100 at a time).\n
+\n
+Usage:\n
+\t$(basename "$0") [-g] [-h] [-s] [-u]\n
+\n
+Arguments:\n
+\t-g  set the group where you want to clean the tickets from\n
+\t-h  show this help text\n
+\t-s  set the ZenDesk subdomain\n
+\t-u  set the username for your ZenDesk account (must have admin rights)"
+
+while getopts ":g:h:s:u:" opt; do
+  case $opt in
+    g) group="$OPTARG"
+    ;;
+    h) echo -e $usage
+       exit
+    ;;
+    s) subdomain="$OPTARG"
+    ;;
+    u) username="$OPTARG"
+    ;;
+    \?) echo "Invalid option -$OPTARG. Use -h for help" >&2
+    ;;
+  esac
+done
+shift $((OPTIND - 1))
+
+if ! [ -x "$(command -v jq)" ]; then
+  echo 'Error: 'jq' is not installed, please see instructions at https://stedolan.github.io/jq/.' >&2
+  exit 1
+fi
+
+
+# request username if not set
+if [[ -z "$username" ]]; then
+  read -p "Username? " username
+fi
+
+# request password
+echo "Password? "
+read -s pass
+
+# the basic auth from Zendesk requires a base64 encoded authorization header
+userpass=$(echo -n "$username:$pass" | base64)
+
+# request subdomain if not set
+if [[ -z "$subdomain" ]]; then
+  read -p "ZenDesk subdomain? " subdomain
+fi
+
+
+# request username if not set
+if [[ -z "$group" ]]; then
+  read -p "Group? " group
+fi
+
+# set the search string
+search_string="group:$group%20status:closed"
+
+# do search curl
+result=$(curl \
+  "https://$subdomain.zendesk.com/api/v2/search.json?query={$search_string}" \
+  -H "Accept:application/json" \
+  -H "Authorization:Basic $userpass"
+)
+
+error=$(echo -n $result | jq -r '.error')
+
+if [[ "$error" != "null" ]]; then
+  echo $error
+  exit 0
+fi
+
+# get amount from result
+amount=$(echo -n $result | jq -r '.count')
+printf "\nAmount of tickets to be deleted: $amount\n\n"
+
+if [[ "$amount" == "0" ]]; then
+  echo "No more tickets to be deleted, bye"
+  exit 0
+fi
+
+# get all tickets from result
+tickets=$(echo -n $result | jq -r '.results')
+
+# get ids from tickets
+ids=""
+for row in $(echo "${tickets}" | jq -r '.[] | @base64'); do
+    _jq() {
+     echo ${row} | base64 --decode | jq -r ${1}
+    }
+
+  id=$(echo -n $(_jq '.id'))
+  ids="$ids,$id"
+done
+
+printf "These ids will be deleted: ${ids:1}\n\n"
+
+# Remove the tickets
+curl "https://$subdomain.zendesk.com/api/v2/tickets/destroy_many.json?ids=${ids:1}" \
+  -X DELETE \
+  -H "Accept:application/json" \
+  -H "Authorization:Basic $userpass" \
+
+printf "\n\nFINISHED\nDon't worry if you get an error.\nZenDesk queues jobs; try again in a couple of minutes"
